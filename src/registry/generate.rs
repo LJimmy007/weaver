@@ -135,7 +135,7 @@ pub(crate) fn command(
     } else {
         WeaverConfig::try_from_path(loader.root())
     }?;
-    crate::registry::apply_template_config(&mut config, cfg);
+    crate::registry::apply_template_config(&mut config, cfg)?;
     let mut output = OutputProcessor::from_template_config(
         config,
         loader,

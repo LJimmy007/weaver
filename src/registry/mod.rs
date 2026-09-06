@@ -377,15 +377,17 @@ pub fn load_config<A: CliOverrides>(
 
 /// Merge the project-level `[template]` settings from `.weaver.toml` into a
 /// template package's forge configuration (loaded from `weaver.yaml`).
-/// Only `acronyms` and `text_maps` are wired today.
+/// The configured JQ modules are loaded after Weaver's built-in prelude.
 pub(crate) fn apply_template_config(
     config: &mut weaver_forge::config::WeaverConfig,
     weaver_config: Option<&weaver_config::WeaverConfig>,
-) {
+) -> Result<(), weaver_forge::error::Error> {
     if let Some(wc) = weaver_config {
         config.merge_acronyms(wc.template.acronyms.clone());
         config.merge_text_maps(wc.template.text_maps.clone());
+        config.load_jq_modules(wc.template.jq_modules.as_deref())?;
     }
+    Ok(())
 }
 
 /// Manage a semantic convention registry and return the exit code.

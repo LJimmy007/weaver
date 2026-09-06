@@ -106,10 +106,12 @@ pub fn load(path: &Path) -> Result<WeaverConfig, ConfigError> {
         path: path.to_path_buf(),
         reason: e.to_string(),
     })?;
-    toml::from_str(&content).map_err(|e| ConfigError::Parse {
+    let mut config: WeaverConfig = toml::from_str(&content).map_err(|e| ConfigError::Parse {
         path: path.to_path_buf(),
         reason: e.to_string(),
-    })
+    })?;
+    config.template.resolve_jq_modules(path);
+    Ok(config)
 }
 
 /// Discover and load a `.weaver.toml` starting from the given directory.

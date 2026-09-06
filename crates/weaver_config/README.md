@@ -38,6 +38,7 @@ format = "ansi"   # ansi | json | gh_workflow_command
 # Shared template settings — applied on top of every template package's `weaver.yaml`.
 [template]
 acronyms = ["API", "HTTP", "SDK", "iOS"] 
+jq_modules = ["jq/common.jq", "jq/service.jq"]
 
 [template.text_maps.namespace_mapping]
 CICD = "CI/CD"
@@ -89,6 +90,32 @@ exclude = ["missing_namespace"]
 ```
 
 See `schemas/weaver-config.json` for the full JSON schema (with VS Code / taplo completion support via the `#:schema` annotation above).
+
+### Shared JQ modules (`[template]`)
+
+`jq_modules` adds reusable JQ definition files to every template package used by
+`registry generate` and `registry update-markdown`. The listed files are loaded
+in declaration order after Weaver's built-in semantic-conventions prelude, so
+their definitions can call the built-in helpers. Relative paths are resolved
+against the `.weaver.toml` file, not the process working directory.
+
+```toml
+[template]
+jq_modules = ["jq/common.jq", "jq/service.jq"]
+```
+
+Each module contains JQ definitions, for example:
+
+```jq
+def service_metrics: semconv_metrics | map(select(.name | startswith("service.")));
+```
+
+The module list is additive: it supplements rather than replaces Weaver's
+built-in prelude. Module files are read and parsed before generation starts;
+missing or invalid files fail with their path and parse or I/O error. Define a
+function name only once when possible. If definitions share a name and arity,
+normal JQ scoping applies: later configured modules override earlier modules,
+and configured modules can override built-in definitions.
 
 ### Dependency Resolution Overrides (`[resolve]`)
 

@@ -38,6 +38,7 @@ use crate::file_loader::{FileContent, FileLoader};
 use crate::formats::html::HtmlRenderOptions;
 use crate::formats::markdown::MarkdownRenderOptions;
 use crate::formats::WordWrapConfig;
+use crate::jq::{load_jq_modules, JqModule};
 use crate::WEAVER_YAML;
 
 /// Weaver configuration.
@@ -76,6 +77,9 @@ pub struct WeaverConfig {
     /// List of acronyms to be considered as unmodifiable words in the case
     /// conversion.
     pub(crate) acronyms: Option<Vec<String>>,
+    /// JQ modules configured by the project-level `.weaver.toml` file.
+    #[serde(skip)]
+    pub(crate) jq_modules: Vec<JqModule>,
 }
 
 /// Case convention for naming of functions and structs.
@@ -491,6 +495,7 @@ impl Default for WeaverConfig {
             params: None,
             templates: None,
             acronyms: None,
+            jq_modules: Vec::new(),
         }
     }
 }
@@ -715,6 +720,18 @@ impl WeaverConfig {
         self.text_maps
             .get_or_insert_with(HashMap::new)
             .extend(incoming);
+    }
+
+    /// Load JQ modules from the project-level `.weaver.toml` configuration.
+    pub fn load_jq_modules(
+        &mut self,
+        paths: Option<&[std::path::PathBuf]>,
+    ) -> Result<(), Error> {
+        self.jq_modules = match paths {
+            Some(paths) => load_jq_modules(paths)?,
+            None => Vec::new(),
+        };
+        Ok(())
     }
 }
 

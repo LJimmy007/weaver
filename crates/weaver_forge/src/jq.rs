@@ -3,6 +3,7 @@
 //! Library to hide details of jaq from the rest of weaver.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use jaq_core::{
@@ -15,10 +16,47 @@ use jaq_json::Val;
 
 type JqFileType = ();
 
+/// A user-provided JQ module loaded from the project configuration.
+#[derive(Debug, Clone)]
+pub(crate) struct JqModule {
+    code: String,
+}
+
+/// Read and validate JQ modules before template generation begins.
+pub(crate) fn load_jq_modules(paths: &[PathBuf]) -> Result<Vec<JqModule>, Error> {
+    paths
+        .iter()
+        .map(|path| {
+            let code = std::fs::read_to_string(path).map_err(|error| Error::FileLoaderError {
+                file: path.clone(),
+                error: error.to_string(),
+            })?;
+            validate_jq_module(path, &code)?;
+            Ok(JqModule { code })
+        })
+        .collect()
+}
+
+fn validate_jq_module(path: &Path, code: &str) -> Result<(), Error> {
+    load::parse(code, |parser| parser.defs()).ok_or_else(|| Error::InvalidJqModule {
+        module: path.to_path_buf(),
+        error: "failed to parse JQ definitions".to_owned(),
+    })?;
+    Ok(())
+}
+
 fn semconv_prelude() -> impl Iterator<Item = Def<&'static str>> {
     load::parse(crate::SEMCONV_JQ, |p| p.defs())
         .expect("BAD WEAVER BUILD - default JQ library failed to compile")
         .into_iter()
+}
+
+fn user_preludes(modules: &[JqModule]) -> impl Iterator<Item = Def<&str>> {
+    modules.iter().flat_map(|module| {
+        load::parse(&module.code, |parser| parser.defs())
+            .expect("JQ modules are validated when their configuration is loaded")
+            .into_iter()
+    })
 }
 
 fn serde_to_val(v: serde_json::Value) -> Result<Val, Error> {
@@ -42,12 +80,23 @@ fn prepare_jq_context(
 
 /// This is our single entry point for calling into the jaq library to run jq filters.
 pub fn execute_jq(
+    input: &serde_json::Value,
+    filter_expr: &str,
+    params: &BTreeMap<String, serde_json::Value>,
+) -> Result<serde_json::Value, Error> {
+    execute_jq_with_modules(input, filter_expr, params, &[])
+}
+
+/// Execute a JQ filter with project-provided module definitions.
+pub(crate) fn execute_jq_with_modules(
     // The JSON input to JQ.
     input: &serde_json::Value,
     // The JQ filter to compile.
     filter_expr: &str,
     // Note: This will be exposed with `${key}` as the variable name.
     params: &BTreeMap<String, serde_json::Value>,
+    // User-provided definitions loaded after the built-in prelude.
+    modules: &[JqModule],
 ) -> Result<serde_json::Value, Error> {
     if log::log_enabled!(log::Level::Trace) {
         log::trace!("Executing JQ filter: {filter_expr} with params {params:#?}, input {input:#?}");
@@ -56,11 +105,11 @@ pub fn execute_jq(
     }
 
     let loader = Loader::new(
-        // ToDo: Allow custom preludes?
         jaq_core::defs()
             .chain(jaq_std::defs())
             .chain(jaq_json::defs())
-            .chain(semconv_prelude()),
+            .chain(semconv_prelude())
+            .chain(user_preludes(modules)),
     );
     let arena = Arena::default();
     let program: File<&str, JqFileType> = File {
@@ -264,7 +313,7 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
 
-    use super::execute_jq;
+    use super::{execute_jq, execute_jq_with_modules, load_jq_modules};
 
     #[test]
     fn run_jq() {
@@ -366,5 +415,79 @@ mod tests {
         let input = json!({});
         let values = BTreeMap::new();
         let _ = execute_jq(&input, "00.0", &values);
+    }
+
+    #[test]
+    fn test_user_modules_are_loaded_in_declared_order() {
+        let temp = tempfile::tempdir().expect("Failed to create temporary directory");
+        let first = temp.path().join("first.jq");
+        let second = temp.path().join("second.jq");
+        std::fs::write(&first, "def prefix: \"first\";\n").expect("Failed to write module");
+        std::fs::write(&second, "def value: prefix + \" second\";\n")
+            .expect("Failed to write module");
+
+        let modules = load_jq_modules(&[first, second]).expect("Failed to load modules");
+        let result = execute_jq_with_modules(&json!({}), "value", &BTreeMap::new(), &modules)
+            .expect("Failed to run module definition");
+
+        assert_eq!(result, json!("first second"));
+    }
+
+    #[test]
+    fn test_later_user_module_definition_overrides_earlier_definition() {
+        let temp = tempfile::tempdir().expect("Failed to create temporary directory");
+        let first = temp.path().join("first.jq");
+        let second = temp.path().join("second.jq");
+        std::fs::write(&first, "def value: \"first\";\n").expect("Failed to write module");
+        std::fs::write(&second, "def value: \"second\";\n")
+            .expect("Failed to write module");
+
+        let modules = load_jq_modules(&[first, second]).expect("Failed to load modules");
+        let result = execute_jq_with_modules(&json!({}), "value", &BTreeMap::new(), &modules)
+            .expect("Failed to run module definition");
+
+        assert_eq!(result, json!("second"));
+    }
+
+    #[test]
+    fn test_user_module_definition_overrides_builtin_prelude_definition() {
+        let temp = tempfile::tempdir().expect("Failed to create temporary directory");
+        let module = temp.path().join("override.jq");
+        std::fs::write(&module, "def semconv_metrics: \"custom\";\n")
+            .expect("Failed to write module");
+
+        let modules = load_jq_modules(&[module]).expect("Failed to load module");
+        let result = execute_jq_with_modules(
+            &json!({}),
+            "semconv_metrics",
+            &BTreeMap::new(),
+            &modules,
+        )
+            .expect("Failed to run module definition");
+
+        assert_eq!(result, json!("custom"));
+    }
+
+    #[test]
+    fn test_invalid_user_module_reports_its_path() {
+        let temp = tempfile::tempdir().expect("Failed to create temporary directory");
+        let module = temp.path().join("invalid.jq");
+        std::fs::write(&module, "def incomplete: ;\n").expect("Failed to write module");
+
+        let error = load_jq_modules(&[module.clone()]).expect_err("Expected invalid module error");
+        let message = error.to_string();
+        assert!(message.contains(&module.display().to_string()));
+        assert!(message.contains("Invalid JQ module"));
+    }
+
+    #[test]
+    fn test_missing_user_module_reports_its_path() {
+        let missing = tempfile::tempdir()
+            .expect("Failed to create temporary directory")
+            .path()
+            .join("missing.jq");
+
+        let error = load_jq_modules(&[missing.clone()]).expect_err("Expected missing module error");
+        assert!(error.to_string().contains(&missing.display().to_string()));
     }
 }

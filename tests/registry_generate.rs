@@ -203,6 +203,75 @@ templates:
     assert_eq!(lines[2], "int64");
 }
 
+/// End-to-end check that project JQ modules are resolved relative to
+/// `.weaver.toml`, supplement the built-in prelude, and are available to both
+/// template filters and `when` clauses.
+#[test]
+fn test_generate_loads_project_jq_modules() {
+    let registry = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates")
+        .join("weaver_codegen_test")
+        .join("semconv_registry");
+
+    let project = tempfile::tempdir().expect("Failed to create temp project");
+    let proj = project.path();
+    let modules = proj.join("jq");
+    fs::create_dir_all(&modules).expect("Failed to create JQ module directory");
+    fs::write(
+        modules.join("metrics.jq"),
+        "def custom_metric_count: semconv_metrics | length;\n",
+    )
+    .expect("Failed to write JQ module");
+    fs::write(
+        proj.join(".weaver.toml"),
+        "[template]\njq_modules = [\"jq/metrics.jq\"]\n",
+    )
+    .expect("Failed to write project config");
+
+    let tdir = proj.join("templates").join("registry").join("tgt");
+    fs::create_dir_all(&tdir).expect("Failed to create template directory");
+    fs::write(
+        tdir.join("weaver.yaml"),
+        r#"templates:
+  - template: "out.md"
+    filter: "custom_metric_count"
+    application_mode: single
+    when: "custom_metric_count > 0"
+"#,
+    )
+    .expect("Failed to write template config");
+    fs::write(tdir.join("out.md"), "{{ ctx }}\n").expect("Failed to write template");
+
+    let mut cmd = Command::cargo_bin("weaver").unwrap();
+    let output = cmd
+        .current_dir(proj)
+        .arg("--quiet")
+        .arg("registry")
+        .arg("generate")
+        .arg("-r")
+        .arg(&registry)
+        .arg("-t")
+        .arg("templates")
+        .arg("--skip-policies")
+        .arg("tgt")
+        .arg("out")
+        .timeout(std::time::Duration::from_secs(60))
+        .output()
+        .expect("failed to execute process");
+
+    assert!(
+        output.status.success(),
+        "generate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let generated =
+        fs::read_to_string(proj.join("out").join("out.md")).expect("Failed to read output");
+    assert!(
+        generated.trim().parse::<usize>().is_ok(),
+        "Expected custom JQ module result, got {generated:?}"
+    );
+}
+
 /// End-to-end check that a template `when` clause (a JQ expression over the
 /// template params under `$params`) gates whether the template is applied. The
 /// unconditional template is always generated; the conditional one appears only

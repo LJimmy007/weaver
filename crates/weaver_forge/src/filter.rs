@@ -3,6 +3,7 @@
 //! Filter JSON values using a simple expression language.
 
 use crate::error::Error;
+use crate::jq::JqModule;
 use core::fmt;
 use std::{collections::BTreeMap, fmt::Debug};
 
@@ -27,8 +28,9 @@ impl Filter {
         &self,
         ctx: serde_json::Value,
         values: &BTreeMap<String, serde_json::Value>,
+        modules: &[JqModule],
     ) -> Result<serde_json::Value, Error> {
-        crate::jq::execute_jq(&ctx, &self.filter_expr, values)
+        crate::jq::execute_jq_with_modules(&ctx, &self.filter_expr, values, modules)
     }
 }
 
@@ -46,13 +48,13 @@ mod tests {
     fn test_filter() {
         let filter = super::Filter::new("true");
         let result = filter
-            .apply(serde_json::json!({}), &BTreeMap::new())
+            .apply(serde_json::json!({}), &BTreeMap::new(), &[])
             .unwrap();
         assert_eq!(result, serde_json::json!(true));
 
         let filter = super::Filter::new(".");
         let result = filter
-            .apply(serde_json::json!({}), &BTreeMap::new())
+            .apply(serde_json::json!({}), &BTreeMap::new(), &[])
             .unwrap();
         assert_eq!(result, serde_json::Value::Object(serde_json::Map::new()));
 
@@ -64,6 +66,7 @@ mod tests {
                     "b": 2,
                 }),
                 &BTreeMap::new(),
+                &[],
             )
             .unwrap();
         assert_eq!(
@@ -82,6 +85,7 @@ mod tests {
                     "key2": 2,
                 }),
                 &BTreeMap::new(),
+                &[],
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(1));
@@ -94,6 +98,7 @@ mod tests {
                     "key2": 2,
                 }),
                 &BTreeMap::new(),
+                &[],
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(1));
@@ -111,6 +116,7 @@ mod tests {
                     "key2": 2,
                 }),
                 &vars,
+                &[],
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(1));
@@ -129,13 +135,13 @@ end"#;
         let mut ctx = BTreeMap::new();
         let _ = ctx.insert("incubating".to_owned(), serde_json::Value::Bool(true));
         let filter = super::Filter::new(jq_filter);
-        let result = filter.apply(input.clone(), &ctx).unwrap();
+        let result = filter.apply(input.clone(), &ctx, &[]).unwrap();
         assert_eq!(result, input);
 
         // When incubating = false the filter should return an empty array
         let _ = ctx.insert("incubating".to_owned(), serde_json::Value::Bool(false));
         let filter = super::Filter::new(jq_filter);
-        let result = filter.apply(input.clone(), &ctx).unwrap();
+        let result = filter.apply(input.clone(), &ctx, &[]).unwrap();
         assert_eq!(result, serde_json::Value::Null);
     }
 }

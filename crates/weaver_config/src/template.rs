@@ -15,6 +15,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Project-level template settings shared across all template packages.
 ///
@@ -30,11 +31,30 @@ pub struct TemplateConfig {
     /// Named text mappings used by the `map_text` filter (e.g. a
     /// `namespace_mapping` from `CICD` to `CI/CD`).
     pub text_maps: Option<HashMap<String, HashMap<String, String>>>,
+
+    /// JQ modules added after Weaver's built-in semantic-conventions prelude.
+    pub jq_modules: Option<Vec<PathBuf>>,
+}
+
+impl TemplateConfig {
+    /// Resolve relative JQ module paths against the project configuration file.
+    pub(crate) fn resolve_jq_modules(&mut self, config_path: &Path) {
+        let Some(modules) = &mut self.jq_modules else {
+            return;
+        };
+        let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+        for module in modules {
+            if module.is_relative() {
+                *module = base.join(&*module);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::WeaverConfig;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn test_parse_template_config() {
@@ -86,11 +106,35 @@ CICD = "CI/CD"
         let config: WeaverConfig = toml::from_str("").expect("Failed to parse empty TOML");
         assert!(config.template.acronyms.is_none());
         assert!(config.template.text_maps.is_none());
+        assert!(config.template.jq_modules.is_none());
     }
 
     #[test]
     fn test_template_empty_section() {
         let config: WeaverConfig = toml::from_str("[template]").expect("Failed to parse TOML");
         assert!(config.template.acronyms.is_none());
+    }
+
+    #[test]
+    fn test_resolve_jq_modules_against_config_file() {
+        let mut config: WeaverConfig = toml::from_str(
+            r#"
+[template]
+jq_modules = ["jq/common.jq", "/opt/weaver/absolute.jq"]
+"#,
+        )
+        .expect("Failed to parse TOML");
+
+        config
+            .template
+            .resolve_jq_modules(Path::new("/project/.weaver.toml"));
+
+        assert_eq!(
+            config.template.jq_modules,
+            Some(vec![
+                PathBuf::from("/project/jq/common.jq"),
+                PathBuf::from("/opt/weaver/absolute.jq"),
+            ])
+        );
     }
 }
