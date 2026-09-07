@@ -8,7 +8,7 @@
 //! list of acronyms used by the `acronym` filter, or the `text_maps` used by
 //! the `map_text` filter — without editing each package.
 //!
-//! Only `acronyms` and `text_maps` are wired today. Additional settings from
+//! `acronyms`, `text_maps`, and `jq_modules` are wired today. Additional settings from
 //! the design (`template_syntax`, `whitespace_control`, `params`) can be added
 //! here as they are implemented.
 

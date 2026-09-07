@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+# [Unreleased]
+
+- Add project-level `[template].jq_modules` for reusable JQ definitions shared by template filters and `when` clauses.
+
 # [0.26.1] - 2026-09-02
 
 - Fix `weaver-installer.sh` failing to detect Unix platforms due to missing bash shell in release workflow. ([#1744](https://github.com/open-telemetry/weaver/issues/1744))

@@ -3,7 +3,7 @@
 //! Library to hide details of jaq from the rest of weaver.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::error::Error;
 use jaq_core::{
@@ -19,30 +19,83 @@ type JqFileType = ();
 /// A user-provided JQ module loaded from the project configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct JqModule {
+    path: PathBuf,
     code: String,
 }
 
 /// Read and validate JQ modules before template generation begins.
 pub(crate) fn load_jq_modules(paths: &[PathBuf]) -> Result<Vec<JqModule>, Error> {
-    paths
-        .iter()
-        .map(|path| {
-            let code = std::fs::read_to_string(path).map_err(|error| Error::FileLoaderError {
+    let mut modules = Vec::with_capacity(paths.len());
+    let mut definitions = String::new();
+    for path in paths {
+        let module = JqModule {
+            path: path.clone(),
+            code: std::fs::read_to_string(path).map_err(|error| Error::FileLoaderError {
                 file: path.clone(),
                 error: error.to_string(),
-            })?;
-            validate_jq_module(path, &code)?;
-            Ok(JqModule { code })
-        })
-        .collect()
+            })?,
+        };
+        let line_offset = definitions.lines().count();
+        if !definitions.is_empty() && !definitions.ends_with('\n') {
+            definitions.push('\n');
+        }
+        definitions.push_str(&module.code);
+        validate_jq_module(&definitions).map_err(|details| Error::InvalidJqModule {
+            module: module.path.clone(),
+            details: localize_details(details, line_offset),
+        })?;
+        modules.push(module);
+    }
+
+    Ok(modules)
 }
 
-fn validate_jq_module(path: &Path, code: &str) -> Result<(), Error> {
-    load::parse(code, |parser| parser.defs()).ok_or_else(|| Error::InvalidJqModule {
-        module: path.to_path_buf(),
-        error: "failed to parse JQ definitions".to_owned(),
-    })?;
+fn validate_jq_module(definitions: &str) -> Result<(), Vec<FilterErrorDetail>> {
+    // Adding an expression makes the definitions a complete JQ program, which
+    // lets jaq report both loader and compiler errors with source spans.
+    let program_code = format!("{definitions}\nempty");
+    #[allow(clippy::map_identity)]
+    let builtin_definitions =
+        jaq_core::defs()
+            .chain(jaq_std::defs())
+            .chain(jaq_json::defs())
+            .chain(semconv_prelude().map(|definition| definition));
+    let loader = Loader::new(builtin_definitions);
+    let arena = Arena::default();
+    let program: File<&str, JqFileType> = File {
+        code: &program_code,
+        path: (),
+    };
+    let program = loader
+        .load(&arena, program)
+        .map_err(load_errors)?;
+    let funs = jaq_core::funs()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs());
+    #[allow(clippy::map_identity)]
+    jaq_core::Compiler::default()
+        // Re-borrow &'static str with a shorter lifetime to unify it with the
+        // temporary validation program.
+        .with_funs(funs.map(|function| function))
+        .compile(program)
+        .map_err(compile_errors)?;
     Ok(())
+}
+
+fn localize_details(
+    mut details: Vec<FilterErrorDetail>,
+    line_offset: usize,
+) -> Vec<FilterErrorDetail> {
+    for detail in &mut details {
+        let Some(source) = &mut detail.source else {
+            continue;
+        };
+        source.start.line = source.start.line.saturating_sub(line_offset);
+        if let Some(end) = &mut source.end {
+            end.line = end.line.saturating_sub(line_offset);
+        }
+    }
+    details
 }
 
 fn semconv_prelude() -> impl Iterator<Item = Def<&'static str>> {
@@ -104,13 +157,14 @@ pub(crate) fn execute_jq_with_modules(
         log::debug!("Executing JQ filter: {filter_expr} with params {params:#?}");
     }
 
-    let loader = Loader::new(
+    #[allow(clippy::map_identity)]
+    let builtin_definitions =
         jaq_core::defs()
             .chain(jaq_std::defs())
             .chain(jaq_json::defs())
-            .chain(semconv_prelude())
-            .chain(user_preludes(modules)),
-    );
+            // Re-borrow the static prelude so it can share the user-module lifetime.
+            .chain(semconv_prelude().map(|definition| definition));
+    let loader = Loader::new(builtin_definitions.chain(user_preludes(modules)));
     let arena = Arena::default();
     let program: File<&str, JqFileType> = File {
         code: filter_expr,
@@ -469,15 +523,47 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_user_module_reports_its_path() {
+    fn test_lexically_invalid_user_module_reports_its_path_and_location() {
         let temp = tempfile::tempdir().expect("Failed to create temporary directory");
         let module = temp.path().join("invalid.jq");
-        std::fs::write(&module, "def incomplete: ;\n").expect("Failed to write module");
+        std::fs::write(&module, "def incomplete: @;\n").expect("Failed to write module");
 
         let error = load_jq_modules(&[module.clone()]).expect_err("Expected invalid module error");
         let message = error.to_string();
         assert!(message.contains(&module.display().to_string()));
         assert!(message.contains("Invalid JQ module"));
+        assert!(message.contains("1:"), "Expected source location in {message}");
+    }
+
+    #[test]
+    fn test_semantically_invalid_user_module_reports_its_path_and_location() {
+        let temp = tempfile::tempdir().expect("Failed to create temporary directory");
+        let module = temp.path().join("invalid-definition.jq");
+        std::fs::write(&module, "def broken: unknown_filter;\n")
+            .expect("Failed to write module");
+
+        let error = load_jq_modules(&[module.clone()]).expect_err("Expected invalid module error");
+        let message = error.to_string();
+        assert!(message.contains(&module.display().to_string()));
+        assert!(message.contains("undefined filter"), "Expected compile error in {message}");
+        assert!(message.contains("1:"), "Expected source location in {message}");
+    }
+
+    #[test]
+    fn test_invalid_later_module_is_attributed_to_that_module() {
+        let temp = tempfile::tempdir().expect("Failed to create temporary directory");
+        let first = temp.path().join("first.jq");
+        let second = temp.path().join("second.jq");
+        std::fs::write(&first, "def shared: \"valid\";\n").expect("Failed to write module");
+        std::fs::write(&second, "def broken: unknown_filter;\n")
+            .expect("Failed to write module");
+
+        let error =
+            load_jq_modules(&[first.clone(), second.clone()]).expect_err("Expected invalid module");
+        let message = error.to_string();
+        assert!(message.contains(&second.display().to_string()));
+        assert!(!message.contains(&first.display().to_string()));
+        assert!(message.contains("1:"), "Expected module-local location in {message}");
     }
 
     #[test]
@@ -489,5 +575,14 @@ mod tests {
 
         let error = load_jq_modules(&[missing.clone()]).expect_err("Expected missing module error");
         assert!(error.to_string().contains(&missing.display().to_string()));
+    }
+
+    #[test]
+    fn test_unreadable_user_module_reports_its_path() {
+        let module = tempfile::tempdir().expect("Failed to create temporary directory");
+        let path = module.path().to_path_buf();
+
+        let error = load_jq_modules(&[path.clone()]).expect_err("Expected unreadable module error");
+        assert!(error.to_string().contains(&path.display().to_string()));
     }
 }

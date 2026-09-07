@@ -160,13 +160,13 @@ pub enum Error {
     },
 
     /// Invalid JQ module configured for template generation.
-    #[error("Invalid JQ module `{module}`: {error}")]
+    #[error("Invalid JQ module `{module}`: {}", format_details(.details))]
     #[diagnostic(help("Check that the module contains valid JQ definitions."))]
     InvalidJqModule {
         /// Module path.
         module: PathBuf,
-        /// Parse error.
-        error: String,
+        /// Parse or compile errors with their module-local source locations.
+        details: Vec<FilterErrorDetail>,
     },
 
     /// Template engine error.

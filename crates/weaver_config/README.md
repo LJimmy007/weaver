@@ -111,8 +111,9 @@ def service_metrics: semconv_metrics | map(select(.name | startswith("service.")
 ```
 
 The module list is additive: it supplements rather than replaces Weaver's
-built-in prelude. Module files are read and parsed before generation starts;
-missing or invalid files fail with their path and parse or I/O error. Define a
+built-in prelude. Module files are read, parsed, and compiled before generation
+starts; missing or invalid files fail with their path and actionable parse,
+compile, or I/O diagnostics. Define a
 function name only once when possible. If definitions share a name and arity,
 normal JQ scoping applies: later configured modules override earlier modules,
 and configured modules can override built-in definitions.
